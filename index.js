@@ -35,6 +35,7 @@ let conocimiento = cargarJSON(CONOCIMIENTO_FILE, []);
 
 const NUMERO_ADMIN = process.env.NUMERO_ADMIN || "";
 const conversaciones = new Map();
+const urgenciasActivas = new Set(); // números con urgencia activa
 
 // ============================================================
 //  HORARIO DE ATENCIÓN (zona horaria Argentina UTC-3)
@@ -258,7 +259,9 @@ ayuda`);
     // Primero chequeamos si es urgencia — tiene prioridad sobre el horario
     const esUrgencia = /quema|fuego|corto|chispa|explosi|sin luz|cortocircuito|peligro|urgente|urgencia|es urgente|es una urgencia|necesito a diego|hablar con diego|hablar con el electricista|quiero hablar|llamame|llam[aá]me|no tenemos luz|quedamos sin luz|se fue la luz|no hay luz|devuelvan la luz|con quien puedo hablar/i.test(texto);
 
-    if (estado !== "abierto" && esUrgencia) {
+    const urgenciaActiva = urgenciasActivas.has(from) || urgenciasActivas.has(fromAlt);
+
+    if (estado !== "abierto" && (esUrgencia || urgenciaActiva)) {
       const historialUrg = conversaciones.get(from) || [];
       const yaNotificado = historialUrg.length > 0;
 
@@ -274,6 +277,10 @@ Requiere atención inmediata.`;
           await enviarMensaje(phoneNumberId, NUMERO_ADMIN, notifUrgencia);
         } catch (e) { console.warn("No se pudo notificar urgencia:", e.message); }
       }
+
+      // Marcar urgencia activa para este número
+      urgenciasActivas.add(from);
+      urgenciasActivas.add(fromAlt);
 
       // Primera vez: mensaje fijo de urgencia
       // Siguientes mensajes: IA continúa la conversación con contexto de urgencia
@@ -293,7 +300,9 @@ Requiere atención inmediata.`;
 
       const promptUrgencia = buildPrompt() + `
 
-CONTEXTO ACTUAL: Es fuera de horario y el cliente tiene una urgencia eléctrica. Ya le pediste el problema y la dirección. Ahora respondé naturalmente según lo que te está diciendo — no repitas las preguntas si ya las respondió. Sé empático, breve y profesional. Si ya tiene los datos completos (problema + dirección), confirmale que Diego va en camino o se contacta pronto.`;
+CONTEXTO ACTUAL: Es fuera de horario y el cliente tiene una urgencia eléctrica activa. Respondé naturalmente según la conversación — no repitas preguntas ya respondidas. Sé empático, muy breve y profesional.
+Si el cliente hace una pregunta que no podés responder con certeza (como tiempos de llegada, costos, disponibilidad exacta), NO inventes — respondé: "Diego se va a comunicar con vos a la brevedad, gracias por tu paciencia. 🙏 — Asistente DC Electricista ⚡".
+Si ya tenés problema y dirección, confirmale que Diego fue notificado y se contacta pronto. Finalizá siempre con un saludo cordial y la firma.`;
 
       const response = await groq.chat.completions.create({
         model: "llama-3.3-70b-versatile",
