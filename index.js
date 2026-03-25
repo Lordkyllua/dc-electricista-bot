@@ -62,15 +62,25 @@ const MENSAJE_FUERA_HORARIO = `¡Hola! 👋 Gracias por contactar a *DC Electric
 • Lunes a viernes: 8 a 18hs
 • Sábados: 8 a 13hs
 
-En este momento estamos fuera de horario. Te respondemos en el próximo turno disponible. 🙌
+En este momento estamos fuera de horario. Fuera de ese horario solo atendemos *urgencias eléctricas* 🔌
+
+Si tenés una urgencia (sin luz, cortocircuito, chispa, peligro eléctrico), escribinos y Diego te responde a la brevedad. ⚡
+
+Si no es urgente, te atendemos en el próximo horario disponible. 🙌
 
 — Asistente DC Electricista ⚡`;
 
-const MENSAJE_URGENCIAS = `¡Hola! 👋 Gracias por contactar a *DC Electricista*.
+const MENSAJE_URGENCIAS = `⚡ *Urgencia recibida — DC Electricista*
 
-⚡ Fuera del horario habitual, solo atendemos *urgencias eléctricas*.
+Entendemos que es urgente y lo estamos tomando con prioridad. 🙏
 
-Si tu situación es urgente, describila y Diego se va a comunicar a la brevedad.
+Diego fue notificado y se va a comunicar con vos a la brevedad.
+
+Mientras tanto, contanos:
+• ¿Qué está pasando exactamente?
+• ¿Cuál es tu dirección?
+
+Así Diego va preparado y te atiende más rápido. 🔧
 
 — Asistente DC Electricista ⚡`;
 
@@ -296,8 +306,10 @@ Requiere atención inmediata.`;
     const quiereVisita = /nombre|direcci[oó]n|horario|visita|coordinar|agenda|cuando pueden|cu[aá]ndo/i.test(texto);
     const tieneNombre = /me llamo|soy |mi nombre/i.test(texto);
     const tieneDireccion = /calle|avenida|barrio|entre |altura |n[uú]mero|\d{3,}/i.test(texto);
+    const tieneUbicacion = tieneDireccion || /vivo en|estoy en|quedo en|mi casa|domicilio/i.test(texto);
 
-    if (tieneNombre && tieneDireccion && adminNorm && NUMERO_ADMIN) {
+    // Notificar cuando alguien da datos de visita o dirección en urgencia
+    if ((tieneNombre || tieneUbicacion) && adminNorm && NUMERO_ADMIN) {
       const aviso =
 `📋 *Nueva solicitud de visita*
 
