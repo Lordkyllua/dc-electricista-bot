@@ -259,18 +259,67 @@ ayuda`);
     const esUrgencia = /quema|fuego|corto|chispa|explosi|sin luz|cortocircuito|peligro|urgente|urgencia|es urgente|es una urgencia|necesito a diego|hablar con diego|hablar con el electricista|quiero hablar|llamame|llam[aá]me|no tenemos luz|quedamos sin luz|se fue la luz|no hay luz|devuelvan la luz|con quien puedo hablar/i.test(texto);
 
     if (estado !== "abierto" && esUrgencia) {
-      // Es urgencia fuera de horario — notificar a Diego y responder al cliente
-      const notifUrgencia = `⚠️ *URGENCIA FUERA DE HORARIO*
+      const historialUrg = conversaciones.get(from) || [];
+      const yaNotificado = historialUrg.length > 0;
+
+      // Notificar a Diego solo la primera vez
+      if (!yaNotificado && adminNorm && NUMERO_ADMIN) {
+        const notifUrgencia = `⚠️ *URGENCIA FUERA DE HORARIO*
 
 👤 Cliente: ${from}
 💬 Mensaje: "${texto}"
 
 Requiere atención inmediata.`;
-      try {
-        if (adminNorm && NUMERO_ADMIN) await enviarMensaje(phoneNumberId, NUMERO_ADMIN, notifUrgencia);
-      } catch (e) { console.warn("No se pudo notificar urgencia:", e.message); }
-      await enviarMensaje(phoneNumberId, from, MENSAJE_URGENCIAS);
-      console.log(`🚨 Urgencia fuera de horario de ${from}`);
+        try {
+          await enviarMensaje(phoneNumberId, NUMERO_ADMIN, notifUrgencia);
+        } catch (e) { console.warn("No se pudo notificar urgencia:", e.message); }
+      }
+
+      // Primera vez: mensaje fijo de urgencia
+      // Siguientes mensajes: IA continúa la conversación con contexto de urgencia
+      if (!yaNotificado) {
+        if (!conversaciones.has(from)) conversaciones.set(from, []);
+        conversaciones.get(from).push({ role: "user", content: texto });
+        conversaciones.get(from).push({ role: "assistant", content: MENSAJE_URGENCIAS });
+        await enviarMensaje(phoneNumberId, from, MENSAJE_URGENCIAS);
+        console.log(`🚨 Urgencia fuera de horario de ${from}`);
+        return;
+      }
+
+      // A partir del segundo mensaje — IA responde con contexto de urgencia
+      if (!conversaciones.has(from)) conversaciones.set(from, []);
+      const historial = conversaciones.get(from);
+      historial.push({ role: "user", content: texto });
+
+      const promptUrgencia = buildPrompt() + `
+
+CONTEXTO ACTUAL: Es fuera de horario y el cliente tiene una urgencia eléctrica. Ya le pediste el problema y la dirección. Ahora respondé naturalmente según lo que te está diciendo — no repitas las preguntas si ya las respondió. Sé empático, breve y profesional. Si ya tiene los datos completos (problema + dirección), confirmale que Diego va en camino o se contacta pronto.`;
+
+      const response = await groq.chat.completions.create({
+        model: "llama-3.3-70b-versatile",
+        max_tokens: 300,
+        messages: [
+          { role: "system", content: promptUrgencia },
+          ...historial.slice(-8),
+        ],
+      });
+
+      const respuesta = response.choices[0].message.content;
+      historial.push({ role: "assistant", content: respuesta });
+      if (historial.length > 30) conversaciones.set(from, historial.slice(-20));
+
+      // Si el cliente dio su dirección, notificar a Diego
+      const dioUbicacion = /calle|avenida|barrio|entre|altura|n[uú]mero|\d{3,}|vivo en|estoy en|quedo en/i.test(texto);
+      if (dioUbicacion && adminNorm && NUMERO_ADMIN) {
+        try {
+          await enviarMensaje(phoneNumberId, NUMERO_ADMIN, `📍 *Datos de urgencia actualizados*
+
+👤 Cliente: ${from}
+💬 Último mensaje: "${texto}"`);
+        } catch (e) {}
+      }
+
+      await enviarMensaje(phoneNumberId, from, respuesta);
       return;
     }
 
