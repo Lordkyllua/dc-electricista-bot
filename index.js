@@ -245,14 +245,11 @@ ayuda`);
     // --------------------------------------------------------
     const estado = estaEnHorario();
 
-    if (estado === "cerrado") {
-      await enviarMensaje(phoneNumberId, from, MENSAJE_FUERA_HORARIO);
-      console.log(`🕐 Fuera de horario, mensaje automático enviado a ${from}`);
-      return;
-    }
+    // Primero chequeamos si es urgencia — tiene prioridad sobre el horario
+    const esUrgencia = /quema|fuego|corto|chispa|explosi|sin luz|cortocircuito|peligro|urgente|urgencia|es urgente|es una urgencia|necesito a diego|hablar con diego|hablar con el electricista|quiero hablar|llamame|llam[aá]me|no tenemos luz|quedamos sin luz|se fue la luz|no hay luz|devuelvan la luz|con quien puedo hablar/i.test(texto);
 
-    if (estado === "urgencias") {
-      // Notificar a Diego si es urgencia fuera de horario
+    if (estado !== "abierto" && esUrgencia) {
+      // Es urgencia fuera de horario — notificar a Diego y responder al cliente
       const notifUrgencia = `⚠️ *URGENCIA FUERA DE HORARIO*
 
 👤 Cliente: ${from}
@@ -262,13 +259,15 @@ Requiere atención inmediata.`;
       try {
         if (adminNorm && NUMERO_ADMIN) await enviarMensaje(phoneNumberId, NUMERO_ADMIN, notifUrgencia);
       } catch (e) { console.warn("No se pudo notificar urgencia:", e.message); }
-      // En modo urgencias deja pasar pero con prompt especial de urgencias
-      // Solo responde si el mensaje parece una urgencia, sino manda el mensaje de urgencias
-      const esUrgencia = /quema|fuego|corto|chispa|explosi|sin luz|cortocircuito|peligro|urgente|urgencia|es urgente|es una urgencia|necesito a diego|hablar con diego|hablar con el electricista|quiero hablar|llamame|llam[aá]me|no tenemos luz|quedamos sin luz|se fue la luz|no hay luz/i.test(texto);
-      if (!esUrgencia) {
-        await enviarMensaje(phoneNumberId, from, MENSAJE_URGENCIAS);
-        return;
-      }
+      await enviarMensaje(phoneNumberId, from, MENSAJE_URGENCIAS);
+      console.log(`🚨 Urgencia fuera de horario de ${from}`);
+      return;
+    }
+
+    if (estado === "cerrado") {
+      await enviarMensaje(phoneNumberId, from, MENSAJE_FUERA_HORARIO);
+      console.log(`🕐 Fuera de horario, mensaje automático enviado a ${from}`);
+      return;
     }
 
     // --------------------------------------------------------
