@@ -1,19 +1,18 @@
 // ============================================================
 //  DC Electricista — Bot de WhatsApp
-//  Stack: Node.js + Meta Cloud API + Anthropic
+//  Stack: Node.js + Meta Cloud API + Groq (gratis)
 // ============================================================
 
 import express from "express";
 import fetch from "node-fetch";
-import Anthropic from "@anthropic-ai/sdk";
+import Groq from "groq-sdk";
 
 const app = express();
 app.use(express.json());
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-// Historial de conversaciones en memoria (se resetea si el server reinicia)
-// Para producción seria, usar Redis o una DB simple
+// Historial de conversaciones en memoria
 const conversaciones = new Map();
 
 // ============================================================
@@ -91,7 +90,7 @@ app.post("/webhook", async (req, res) => {
     if (value?.messages?.[0]?.type !== "text") return;
 
     const msg = value.messages[0];
-    const from = msg.from; // número del cliente
+    const from = msg.from;
     const texto = msg.text.body;
     const phoneNumberId = value.metadata.phone_number_id;
 
@@ -104,18 +103,20 @@ app.post("/webhook", async (req, res) => {
     const historial = conversaciones.get(from);
     historial.push({ role: "user", content: texto });
 
-    // Llamada a Anthropic
-    const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+    // Llamada a Groq
+    const response = await groq.chat.completions.create({
+      model: "llama-3.3-70b-versatile",
       max_tokens: 400,
-      system: SYSTEM_PROMPT,
-      messages: historial.slice(-10), // últimos 10 turnos para no gastar tokens
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        ...historial.slice(-10),
+      ],
     });
 
-    const respuesta = response.content[0].text;
+    const respuesta = response.choices[0].message.content;
     historial.push({ role: "assistant", content: respuesta });
 
-    // Limpiar historial si es muy largo (>30 mensajes)
+    // Limpiar historial si es muy largo
     if (historial.length > 30) {
       conversaciones.set(from, historial.slice(-20));
     }
@@ -155,7 +156,7 @@ async function enviarMensaje(phoneNumberId, to, texto) {
 }
 
 // ============================================================
-//  Ruta de health check (para Railway)
+//  Health check para Render
 // ============================================================
 app.get("/", (req, res) => {
   res.send("DC Electricista Bot — activo ✅");
