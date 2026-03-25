@@ -16,7 +16,7 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const conversaciones = new Map();
 
 // ============================================================
-//  PERSONALIDAD DEL BOT — editá esto a gusto
+//  PERSONALIDAD DEL BOT
 // ============================================================
 const SYSTEM_PROMPT = `Sos el asistente virtual de DC Electricista, empresa de electricidad residencial de Lord, ubicada en San Miguel, Buenos Aires, Argentina. También trabajás en toda la zona GBA y CABA.
 
@@ -79,14 +79,13 @@ app.get("/webhook", (req, res) => {
 //  WEBHOOK — recibe mensajes entrantes
 // ============================================================
 app.post("/webhook", async (req, res) => {
-  res.sendStatus(200); // Meta necesita 200 rápido
+  res.sendStatus(200);
 
   try {
     const entry = req.body?.entry?.[0];
     const changes = entry?.changes?.[0];
     const value = changes?.value;
 
-    // Solo procesamos mensajes de texto
     if (value?.messages?.[0]?.type !== "text") return;
 
     const msg = value.messages[0];
@@ -96,14 +95,12 @@ app.post("/webhook", async (req, res) => {
 
     console.log(`📩 Mensaje de ${from}: ${texto}`);
 
-    // Construir historial de conversación
     if (!conversaciones.has(from)) {
       conversaciones.set(from, []);
     }
     const historial = conversaciones.get(from);
     historial.push({ role: "user", content: texto });
 
-    // Llamada a Groq
     const response = await groq.chat.completions.create({
       model: "llama-3.3-70b-versatile",
       max_tokens: 400,
@@ -116,47 +113,69 @@ app.post("/webhook", async (req, res) => {
     const respuesta = response.choices[0].message.content;
     historial.push({ role: "assistant", content: respuesta });
 
-    // Limpiar historial si es muy largo
     if (historial.length > 30) {
       conversaciones.set(from, historial.slice(-20));
     }
 
-    // Enviar respuesta por WhatsApp
     await enviarMensaje(phoneNumberId, from, respuesta);
-    console.log(`✉️  Respuesta enviada a ${from}`);
   } catch (err) {
     console.error("❌ Error procesando mensaje:", err.message);
   }
 });
 
 // ============================================================
-//  Función para enviar mensajes via Meta API
+//  Corrección de formato de número argentino
+//  Meta en modo prueba a veces necesita 541125111680
+//  en lugar de 5491125111680 — probamos ambos formatos
 // ============================================================
+function formatosNumero(numero) {
+  const formatos = [numero];
+  if (numero.startsWith("549")) {
+    formatos.push("54" + numero.slice(3));
+  } else if (numero.startsWith("54") && !numero.startsWith("549")) {
+    formatos.push("549" + numero.slice(2));
+  }
+  return formatos;
+}
+
 async function enviarMensaje(phoneNumberId, to, texto) {
   const url = `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`;
+  const numeros = formatosNumero(to);
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      to,
-      type: "text",
-      text: { body: texto },
-    }),
-  });
+  for (const numero of numeros) {
+    console.log(`📤 Intentando enviar a ${numero}...`);
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to: numero,
+        type: "text",
+        text: { body: texto },
+      }),
+    });
 
-  if (!res.ok) {
-    const error = await res.text();
-    throw new Error(`Meta API error: ${error}`);
+    if (res.ok) {
+      console.log(`✉️  Respuesta enviada a ${numero}`);
+      return;
+    }
+
+    const errorText = await res.text();
+    console.warn(`⚠️  Falló con ${numero}: ${errorText}`);
+
+    if (!errorText.includes("131030")) {
+      throw new Error(`Meta API error: ${errorText}`);
+    }
   }
+
+  throw new Error("No se pudo enviar con ningún formato de número");
 }
 
 // ============================================================
-//  Health check para Render
+//  Health check
 // ============================================================
 app.get("/", (req, res) => {
   res.send("DC Electricista Bot — activo ✅");
