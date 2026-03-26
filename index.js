@@ -1,6 +1,7 @@
 // ============================================================
 //  DC Electricista — Bot de WhatsApp
 //  Stack: Node.js + Meta Cloud API + Groq (gratis)
+//  Versión: 2.0 — Revisada y mejorada
 // ============================================================
 
 import express from "express";
@@ -14,10 +15,18 @@ app.use(express.json());
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 // ============================================================
-//  PERSISTENCIA
+//  CONFIGURACIÓN
 // ============================================================
-const BLOQUEADOS_FILE = "./bloqueados.json";
+const NUMERO_ADMIN  = process.env.NUMERO_ADMIN  || "";
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN || "";
+const VERIFY_TOKEN  = process.env.VERIFY_TOKEN  || "";
+
+// ============================================================
+//  PERSISTENCIA EN DISCO
+// ============================================================
+const BLOQUEADOS_FILE   = "./bloqueados.json";
 const CONOCIMIENTO_FILE = "./conocimiento.json";
+const URGENCIAS_FILE    = "./urgencias.json";
 
 function cargarJSON(archivo, defecto) {
   try {
@@ -27,74 +36,72 @@ function cargarJSON(archivo, defecto) {
 }
 
 function guardarJSON(archivo, data) {
-  fs.writeFileSync(archivo, JSON.stringify(data, null, 2), "utf8");
+  try { fs.writeFileSync(archivo, JSON.stringify(data, null, 2), "utf8"); }
+  catch (e) { console.error(`Error guardando ${archivo}:`, e.message); }
 }
 
-const bloqueados = new Set(cargarJSON(BLOQUEADOS_FILE, []));
-let conocimiento = cargarJSON(CONOCIMIENTO_FILE, []);
-
-const NUMERO_ADMIN = process.env.NUMERO_ADMIN || "";
-const conversaciones = new Map();
-const urgenciasActivas = new Set(); // números con urgencia activa
+const bloqueados       = new Set(cargarJSON(BLOQUEADOS_FILE, []));
+let   conocimiento     = cargarJSON(CONOCIMIENTO_FILE, []);
+const urgenciasActivas = new Set(cargarJSON(URGENCIAS_FILE, []));
+const conversaciones   = new Map();
 
 // ============================================================
-//  HORARIO DE ATENCIÓN (zona horaria Argentina UTC-3)
+//  HORARIO — Argentina UTC-3
 // ============================================================
-function estaEnHorario() {
+function estadoHorario() {
   const ahora = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" }));
-  const dia = ahora.getDay(); // 0=dom, 1=lun ... 6=sab
-  const hora = ahora.getHours();
-  const minutos = ahora.getMinutes();
-  const horaDecimal = hora + minutos / 60;
+  const dia   = ahora.getDay();
+  const hora  = ahora.getHours() + ahora.getMinutes() / 60;
 
-  const esLunesAViernes = dia >= 1 && dia <= 5;
-  const esSabado = dia === 6;
-
-  if (esLunesAViernes && horaDecimal >= 8 && horaDecimal < 18) return "abierto";
-  if (esSabado && horaDecimal >= 8 && horaDecimal < 13) return "abierto";
-  if (esSabado && horaDecimal >= 13) return "urgencias";
-  if (dia === 0) return "urgencias"; // domingo
-  return "cerrado"; // fuera de horario en día hábil
+  if (dia >= 1 && dia <= 5 && hora >= 8 && hora < 18) return "abierto";
+  if (dia === 6             && hora >= 8 && hora < 13) return "abierto";
+  return "cerrado";
 }
 
-const MENSAJE_FUERA_HORARIO = `¡Hola! 👋 Gracias por contactar a *DC Electricista*.
+// ============================================================
+//  MENSAJES FIJOS
+// ============================================================
+const MSG_FUERA_HORARIO = `¡Hola! 👋 Gracias por contactar a *DC Electricista*.
 
 🕐 Nuestro horario de atención es:
 • Lunes a viernes: 8 a 18hs
 • Sábados: 8 a 13hs
 
-En este momento estamos fuera de horario. Fuera de ese horario solo atendemos *urgencias eléctricas* 🔌
+En este momento estamos fuera de horario. Solo atendemos *urgencias eléctricas* 🔌
 
-Si tenés una urgencia (sin luz, cortocircuito, chispa, peligro eléctrico), escribinos y Diego te responde a la brevedad. ⚡
+Si tenés una urgencia (sin luz, cortocircuito, chispa, peligro eléctrico), escribinos y Diego te atiende a la brevedad. ⚡
 
-Si no es urgente, te atendemos en el próximo horario disponible. 🙌
+Si no es urgente, te respondemos en el próximo horario disponible. 🙌
 
 — Asistente DC Electricista ⚡`;
 
-const MENSAJE_URGENCIAS = `⚡ *Urgencia recibida — DC Electricista*
+const MSG_URGENCIA_RECIBIDA = `⚡ *Urgencia recibida — DC Electricista*
 
 Entendemos que es urgente y lo estamos tomando con prioridad. 🙏
 
 Diego fue notificado y se va a comunicar con vos a la brevedad.
 
-Mientras tanto, contanos:
+Para que pueda ir preparado, contanos:
 • ¿Qué está pasando exactamente?
 • ¿Cuál es tu dirección?
-
-Así Diego va preparado y te atiende más rápido. 🔧
 
 — Asistente DC Electricista ⚡`;
 
 // ============================================================
-//  PROMPT BASE
+//  DETECCIÓN DE URGENCIAS
+// ============================================================
+const REGEX_URGENCIA = /quema|fuego|corto|chispa|explosi|sin luz|cortocircuito|peligro|urgente|urgencia|necesito a diego|hablar con diego|quiero hablar|llamame|llam[aá]me|no tenemos luz|quedamos sin luz|se fue la luz|no hay luz|devuelvan la luz|electrocuc|humo|olor a quemado/i;
+
+// ============================================================
+//  PROMPTS
 // ============================================================
 const PROMPT_BASE = `Sos el asistente virtual de DC Electricista. El electricista responsable es Diego Cristaldo, con base en San Miguel, Buenos Aires, Argentina. También trabajás en toda la zona GBA y CABA.
 
-SERVICIOS QUE OFRECEMOS:
+SERVICIOS:
 - Instalaciones eléctricas residenciales
 - Reparaciones y mantenimiento eléctrico
 - Porteros eléctricos (instalación y reparación)
-- Instalación de aire acondicionado
+- Instalación de aire acondicionado (split)
 - Diagnóstico y reparación de problemas eléctricos
 
 ZONA DE COBERTURA:
@@ -105,130 +112,187 @@ ZONA DE COBERTURA:
 HORARIO DE ATENCIÓN:
 - Lunes a viernes: 8 a 18hs
 - Sábados: 8 a 13hs
-- Fuera de ese horario: solo urgencias
+- Fuera de ese horario: solo urgencias eléctricas
 
-CÓMO RESPONDÉS:
-- Siempre en español rioplatense, tono amigable y profesional
-- Usá emojis en tus respuestas para que sean más amigables y dinámicas, pero sin exagerar
-- Respuestas cortas y directas (esto es WhatsApp, no un email)
-- Si te preguntan por precios o presupuestos, decí que Diego se comunica personalmente para asesorarte según el trabajo
-- Si la consulta es muy compleja o requiere inspección, decí algo como: "🙌 Entendido. Diego se va a comunicar con vos en breve, en cuanto se desocupe."
-- Si el cliente pide hablar directamente con Diego o con una persona, respondé: "¡Por supuesto! 😊 Diego se va a comunicar con vos personalmente en breve, en cuanto se desocupe. ¿Querés dejarle algún mensaje para cuando te llame?"
-- No inventés precios ni información técnica que no tenés
-- Si alguien saluda, respondé con algo como "¡Hola! 👋 Bienvenido a DC Electricista. ¿En qué te puedo ayudar?"
-- Nunca digas que sos una IA ni un bot. Si te preguntan, decí que sos el asistente de DC Electricista y cambiá el tema
-- Siempre terminá tus mensajes con la firma: — Asistente DC Electricista ⚡
+REGLAS DE RESPUESTA:
+- Español rioplatense, tono amigable y profesional
+- Usá emojis para que las respuestas sean cálidas, pero sin exagerar
+- Mensajes cortos y directos — esto es WhatsApp, no un email
+- Al saludar siempre mencioná DC Electricista: "¡Hola! 👋 Bienvenido a DC Electricista. ¿En qué te puedo ayudar?"
+- Nunca menciones precios ni presupuestos — decí que Diego se comunica personalmente para asesorar
+- Si el cliente pide hablar con Diego: "¡Por supuesto! 😊 Diego se va a comunicar con vos en breve. ¿Querés dejarle algún mensaje?"
+- Si la consulta requiere inspección: "🙌 Entendido. Diego se va a comunicar con vos en breve."
+- Si no sabés responder algo con certeza: "Diego te va a responder personalmente. ¡Gracias por tu paciencia! 🙏"
+- Nunca digas que sos una IA ni un bot
+- Siempre terminá con la firma: — Asistente DC Electricista ⚡
 
-CONSULTAS TÉCNICAS SIMPLES QUE PODÉS RESPONDER:
-- Qué puede estar causando que salte el disyuntor
+CONSULTAS TÉCNICAS QUE PODÉS RESPONDER:
+- Por qué salta el disyuntor o el diferencial
 - Por qué parpadean las luces
 - Qué es un diferencial y para qué sirve
-- Cuándo hay que llamar a un electricista
-- Qué hacer ante un cortocircuito (medidas de seguridad)
+- Qué hacer ante un cortocircuito (medidas de seguridad básicas)
 - Diferencias entre monofásico y trifásico
 - Qué es la puesta a tierra y por qué importa
+- Cuándo es necesario llamar a un electricista
 
-Si el cliente quiere coordinar una visita, pedile: nombre, dirección y horario disponible, y decile que Diego lo va a confirmar. Cuando tengas esos datos completos, avisale al cliente que Diego va a confirmar pronto.`;
+Si el cliente quiere coordinar una visita, pedile nombre, dirección y horario disponible. Cuando los tengas todos, confirmale que Diego lo va a contactar para confirmar.`;
 
-function buildPrompt() {
-  if (conocimiento.length === 0) return PROMPT_BASE;
+const PROMPT_URGENCIA = `${PROMPT_BASE}
+
+MODO URGENCIA ACTIVA — REGLAS ESPECIALES:
+- El cliente tiene una emergencia eléctrica y ya fue notificado Diego
+- Respondé naturalmente según la conversación — no repitas preguntas ya respondidas
+- Si ya tenés problema y dirección, confirmale que Diego fue notificado y se contacta pronto
+- Si pregunta cuánto tarda Diego: "Diego se va a comunicar a la brevedad, gracias por tu paciencia. 🙏"
+- Si no podés responder algo con certeza, no inventes — derivá a Diego
+- Sé empático, muy breve y tranquilizador
+- Siempre terminá con la firma`;
+
+function buildPrompt(urgencia = false) {
+  const base = urgencia ? PROMPT_URGENCIA : PROMPT_BASE;
+  if (conocimiento.length === 0) return base;
   const extra = conocimiento.map((k, i) => `${i + 1}. ${k}`).join("\n");
-  return `${PROMPT_BASE}\n\nINFORMACIÓN ADICIONAL:\n${extra}`;
+  return `${base}\n\nINFORMACIÓN ADICIONAL SOBRE DC ELECTRICISTA:\n${extra}`;
 }
 
 // ============================================================
-//  WEBHOOK — verificación de Meta
+//  UTILIDADES DE NÚMEROS
+// ============================================================
+function variantes(numero) {
+  if (numero.startsWith("549")) return [numero, "54" + numero.slice(3)];
+  if (numero.startsWith("54"))  return [numero, "549" + numero.slice(2)];
+  return [numero];
+}
+
+function esAdmin(from)            { return NUMERO_ADMIN && variantes(from).some(v => variantes(NUMERO_ADMIN).includes(v)); }
+function estaBloqueado(from)      { return variantes(from).some(v => bloqueados.has(v)); }
+function tieneUrgencia(from)      { return variantes(from).some(v => urgenciasActivas.has(v)); }
+function activarUrgencia(from)    { variantes(from).forEach(v => urgenciasActivas.add(v)); guardarJSON(URGENCIAS_FILE, [...urgenciasActivas]); }
+
+// ============================================================
+//  ENVÍO DE MENSAJES
+// ============================================================
+async function enviarMensaje(phoneId, to, texto) {
+  const url = `https://graph.facebook.com/v19.0/${phoneId}/messages`;
+
+  for (const numero of variantes(to)) {
+    console.log(`📤 → ${numero}`);
+    const res  = await fetch(url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ messaging_product: "whatsapp", to: numero, type: "text", text: { body: texto } }),
+    });
+    const data = await res.json();
+
+    if (res.ok)                      { console.log(`✉️  OK → ${numero}`); return; }
+    if (data?.error?.code === 190)   { console.error("🔑 TOKEN EXPIRADO — Renovar en Meta for Developers"); throw new Error("TOKEN_EXPIRADO"); }
+    if (data?.error?.code === 131030){ console.warn(`⚠️  No autorizado: ${numero}`); continue; }
+
+    throw new Error(`Meta ${data?.error?.code}: ${data?.error?.message}`);
+  }
+  throw new Error("No se pudo enviar con ningún formato de número");
+}
+
+async function notificarDiego(phoneId, mensaje) {
+  if (!NUMERO_ADMIN) return;
+  try { await enviarMensaje(phoneId, NUMERO_ADMIN, mensaje); console.log("🔔 Diego notificado"); }
+  catch (e) { console.warn("No se pudo notificar a Diego:", e.message); }
+}
+
+// ============================================================
+//  IA — Groq con fallback
+// ============================================================
+async function consultarIA(mensajes, urgencia = false) {
+  try {
+    const res = await groq.chat.completions.create({
+      model: "llama-3.3-70b-versatile",
+      max_tokens: urgencia ? 300 : 400,
+      temperature: 0.7,
+      messages: [{ role: "system", content: buildPrompt(urgencia) }, ...mensajes],
+    });
+    return res.choices[0].message.content;
+  } catch (e) {
+    console.error("❌ Error Groq:", e.message);
+    return "Gracias por tu mensaje. Diego se va a comunicar con vos a la brevedad. 🙏\n\n— Asistente DC Electricista ⚡";
+  }
+}
+
+// ============================================================
+//  WEBHOOK — Verificación
 // ============================================================
 app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-  if (mode === "subscribe" && token === process.env.VERIFY_TOKEN) {
-    console.log("✅ Webhook verificado por Meta");
+  const { "hub.mode": mode, "hub.verify_token": token, "hub.challenge": challenge } = req.query;
+  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    console.log("✅ Webhook verificado");
     return res.status(200).send(challenge);
   }
   res.sendStatus(403);
 });
 
 // ============================================================
-//  WEBHOOK — recibe mensajes
+//  WEBHOOK — Mensajes
 // ============================================================
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
   try {
-    const entry = req.body?.entry?.[0];
-    const value = entry?.changes?.[0]?.value;
-    if (value?.messages?.[0]?.type !== "text") return;
+    const value = req.body?.entry?.[0]?.changes?.[0]?.value;
+    const msg   = value?.messages?.[0];
+    if (!msg || msg.type !== "text") return;
 
-    const msg = value.messages[0];
-    const from = msg.from;
-    const texto = msg.text.body.trim();
-    const phoneNumberId = value.metadata.phone_number_id;
+    const from    = msg.from;
+    const texto   = msg.text.body.trim();
+    const phoneId = value.metadata.phone_number_id;
 
-    console.log(`📩 Mensaje de ${from}: ${texto}`);
+    console.log(`📩 [${from}]: ${texto}`);
 
-    // --------------------------------------------------------
-    //  COMANDOS DE ADMIN
-    // --------------------------------------------------------
-    const fromNorm = from.replace(/^549/, "54");
-    const adminNorm = NUMERO_ADMIN.replace(/^549/, "54");
-
-    if (adminNorm && fromNorm === adminNorm) {
-      const cmd = texto.toLowerCase();
+    // 1 — ADMIN
+    if (esAdmin(from)) {
+      const cmd = texto.toLowerCase().trim();
 
       if (cmd.startsWith("bloquear ")) {
-        const numero = texto.split(" ")[1].trim();
-        bloqueados.add(numero);
-        guardarJSON(BLOQUEADOS_FILE, [...bloqueados]);
-        await enviarMensaje(phoneNumberId, from, `🚫 Listo. El bot ya no responde a ${numero}.`);
-        return;
+        const n = texto.slice(9).trim();
+        bloqueados.add(n); guardarJSON(BLOQUEADOS_FILE, [...bloqueados]);
+        await enviarMensaje(phoneId, from, `🚫 Bloqueado: ${n}`); return;
       }
       if (cmd.startsWith("desbloquear ")) {
-        const numero = texto.split(" ")[1].trim();
-        bloqueados.delete(numero);
-        guardarJSON(BLOQUEADOS_FILE, [...bloqueados]);
-        await enviarMensaje(phoneNumberId, from, `✅ Listo. El bot vuelve a responder a ${numero}.`);
-        return;
+        const n = texto.slice(12).trim();
+        bloqueados.delete(n); guardarJSON(BLOQUEADOS_FILE, [...bloqueados]);
+        await enviarMensaje(phoneId, from, `✅ Desbloqueado: ${n}`); return;
       }
       if (cmd === "lista bloqueados") {
-        const lista = bloqueados.size > 0 ? [...bloqueados].join("\n") : "No hay números bloqueados.";
-        await enviarMensaje(phoneNumberId, from, `📋 Números bloqueados:\n${lista}`);
-        return;
+        await enviarMensaje(phoneId, from, bloqueados.size > 0
+          ? `📋 *Bloqueados (${bloqueados.size}):*\n${[...bloqueados].join("\n")}`
+          : "No hay números bloqueados."); return;
       }
       if (cmd.startsWith("aprender ")) {
         const info = texto.slice(9).trim();
-        conocimiento.push(info);
-        guardarJSON(CONOCIMIENTO_FILE, conocimiento);
-        await enviarMensaje(phoneNumberId, from, `🧠 Aprendido:\n"${info}"`);
-        return;
+        if (!info) { await enviarMensaje(phoneId, from, "⚠️ Falta la información.\nEjemplo:\naprender Aceptamos transferencia bancaria"); return; }
+        conocimiento.push(info); guardarJSON(CONOCIMIENTO_FILE, conocimiento);
+        await enviarMensaje(phoneId, from, `🧠 Aprendido (${conocimiento.length} total):\n"${info}"`); return;
       }
       if (cmd === "que sabes") {
-        const lista = conocimiento.length > 0
-          ? conocimiento.map((k, i) => `${i + 1}. ${k}`).join("\n")
-          : "Todavía no aprendí nada extra.";
-        await enviarMensaje(phoneNumberId, from, `🧠 Lo que sé:\n\n${lista}`);
-        return;
+        await enviarMensaje(phoneId, from, conocimiento.length > 0
+          ? `🧠 *Lo que sé (${conocimiento.length} items):*\n\n${conocimiento.map((k,i)=>`${i+1}. ${k}`).join("\n")}`
+          : "Todavía no aprendí nada extra.\n\nUsá: aprender [información]"); return;
       }
       if (cmd.startsWith("olvidar ")) {
-        const info = texto.slice(8).trim();
+        const buscar = texto.slice(8).trim().toLowerCase();
         const antes = conocimiento.length;
-        conocimiento = conocimiento.filter(k => !k.toLowerCase().includes(info.toLowerCase()));
+        conocimiento = conocimiento.filter(k => !k.toLowerCase().includes(buscar));
         guardarJSON(CONOCIMIENTO_FILE, conocimiento);
         const borrados = antes - conocimiento.length;
-        await enviarMensaje(phoneNumberId, from, borrados > 0
-          ? `🗑️ Borré ${borrados} item(s) que contenían "${info}".`
-          : `⚠️ No encontré nada con "${info}".`
-        );
-        return;
+        await enviarMensaje(phoneId, from, borrados > 0
+          ? `🗑️ Borré ${borrados} item(s) con "${buscar}".`
+          : `⚠️ No encontré nada con "${buscar}".`); return;
       }
       if (cmd === "ayuda" || cmd === "comandos") {
-        await enviarMensaje(phoneNumberId, from,
+        await enviarMensaje(phoneId, from,
 `📋 *Comandos disponibles:*
 
 🚫 *Bloqueos:*
-bloquear 549XXXXXXXX
-desbloquear 549XXXXXXXX
+bloquear [número]
+desbloquear [número]
 lista bloqueados
 
 🧠 *Aprendizaje:*
@@ -237,201 +301,116 @@ que sabes
 olvidar [texto]
 
 ❓ *Ayuda:*
-ayuda`);
-        return;
+ayuda`); return;
       }
     }
 
-    // --------------------------------------------------------
-    //  FILTRO — ignorar bloqueados
-    // --------------------------------------------------------
-    const fromAlt = from.startsWith("549") ? "54" + from.slice(3) : "549" + from.slice(2);
-    if (bloqueados.has(from) || bloqueados.has(fromAlt)) {
-      console.log(`🚫 Ignorado (bloqueado): ${from}`);
-      return;
-    }
+    // 2 — BLOQUEADOS
+    if (estaBloqueado(from)) { console.log(`🚫 Bloqueado: ${from}`); return; }
 
-    // --------------------------------------------------------
-    //  HORARIO — respuesta automática fuera de horario
-    // --------------------------------------------------------
-    const estado = estaEnHorario();
+    // 3 — HORARIO Y URGENCIAS
+    const fueraHorario  = estadoHorario() !== "abierto";
+    const esUrg         = REGEX_URGENCIA.test(texto);
+    const urgActiva     = tieneUrgencia(from);
 
-    // Primero chequeamos si es urgencia — tiene prioridad sobre el horario
-    const esUrgencia = /quema|fuego|corto|chispa|explosi|sin luz|cortocircuito|peligro|urgente|urgencia|es urgente|es una urgencia|necesito a diego|hablar con diego|hablar con el electricista|quiero hablar|llamame|llam[aá]me|no tenemos luz|quedamos sin luz|se fue la luz|no hay luz|devuelvan la luz|con quien puedo hablar/i.test(texto);
+    if (fueraHorario && (esUrg || urgActiva)) {
+      if (!urgActiva) activarUrgencia(from);
 
-    const urgenciaActiva = urgenciasActivas.has(from) || urgenciasActivas.has(fromAlt);
+      const hist         = conversaciones.get(from) || [];
+      const esPrimero    = hist.length === 0;
 
-    if (estado !== "abierto" && (esUrgencia || urgenciaActiva)) {
-      const historialUrg = conversaciones.get(from) || [];
-      const yaNotificado = historialUrg.length > 0;
-
-      // Notificar a Diego solo la primera vez
-      if (!yaNotificado && adminNorm && NUMERO_ADMIN) {
-        const notifUrgencia = `⚠️ *URGENCIA FUERA DE HORARIO*
+      // Notificar a Diego la primera vez
+      if (esPrimero) {
+        await notificarDiego(phoneId,
+`⚠️ *URGENCIA FUERA DE HORARIO*
 
 👤 Cliente: ${from}
-💬 Mensaje: "${texto}"
+💬 "${texto}"
 
-Requiere atención inmediata.`;
-        try {
-          await enviarMensaje(phoneNumberId, NUMERO_ADMIN, notifUrgencia);
-        } catch (e) { console.warn("No se pudo notificar urgencia:", e.message); }
+Requiere atención inmediata.`);
       }
 
-      // Marcar urgencia activa para este número
-      urgenciasActivas.add(from);
-      urgenciasActivas.add(fromAlt);
+      // Notificar si da dirección
+      if (!esPrimero && /calle |avenida |barrio |entre |vivo en |quedo en |mi domicilio|\bN°|\bNro\b/i.test(texto)) {
+        await notificarDiego(phoneId, `📍 *Dirección recibida*\n👤 ${from}\n📌 "${texto}"`);
+      }
 
-      // Primera vez: mensaje fijo de urgencia
-      // Siguientes mensajes: IA continúa la conversación con contexto de urgencia
-      if (!yaNotificado) {
-        if (!conversaciones.has(from)) conversaciones.set(from, []);
-        conversaciones.get(from).push({ role: "user", content: texto });
-        conversaciones.get(from).push({ role: "assistant", content: MENSAJE_URGENCIAS });
-        await enviarMensaje(phoneNumberId, from, MENSAJE_URGENCIAS);
-        console.log(`🚨 Urgencia fuera de horario de ${from}`);
+      // Primer mensaje: respuesta fija
+      if (esPrimero) {
+        hist.push({ role: "user", content: texto }, { role: "assistant", content: MSG_URGENCIA_RECIBIDA });
+        conversaciones.set(from, hist);
+        await enviarMensaje(phoneId, from, MSG_URGENCIA_RECIBIDA);
+        console.log(`🚨 Urgencia: ${from}`);
         return;
       }
 
-      // A partir del segundo mensaje — IA responde con contexto de urgencia
-      if (!conversaciones.has(from)) conversaciones.set(from, []);
-      const historial = conversaciones.get(from);
-      historial.push({ role: "user", content: texto });
-
-      const promptUrgencia = buildPrompt() + `
-
-CONTEXTO ACTUAL: Es fuera de horario y el cliente tiene una urgencia eléctrica activa. Respondé naturalmente según la conversación — no repitas preguntas ya respondidas. Sé empático, muy breve y profesional.
-Si el cliente hace una pregunta que no podés responder con certeza (como tiempos de llegada, costos, disponibilidad exacta), NO inventes — respondé: "Diego se va a comunicar con vos a la brevedad, gracias por tu paciencia. 🙏 — Asistente DC Electricista ⚡".
-Si ya tenés problema y dirección, confirmale que Diego fue notificado y se contacta pronto. Finalizá siempre con un saludo cordial y la firma.`;
-
-      const response = await groq.chat.completions.create({
-        model: "llama-3.3-70b-versatile",
-        max_tokens: 300,
-        messages: [
-          { role: "system", content: promptUrgencia },
-          ...historial.slice(-8),
-        ],
-      });
-
-      const respuesta = response.choices[0].message.content;
-      historial.push({ role: "assistant", content: respuesta });
-      if (historial.length > 30) conversaciones.set(from, historial.slice(-20));
-
-      // Si el cliente dio su dirección, notificar a Diego
-      const dioUbicacion = /calle|avenida|barrio|entre|altura|n[uú]mero|\d{3,}|vivo en|estoy en|quedo en/i.test(texto);
-      if (dioUbicacion && adminNorm && NUMERO_ADMIN) {
-        try {
-          await enviarMensaje(phoneNumberId, NUMERO_ADMIN, `📍 *Datos de urgencia actualizados*
-
-👤 Cliente: ${from}
-💬 Último mensaje: "${texto}"`);
-        } catch (e) {}
-      }
-
-      await enviarMensaje(phoneNumberId, from, respuesta);
+      // Siguientes: IA con contexto de urgencia
+      hist.push({ role: "user", content: texto });
+      const respuesta = await consultarIA(hist.slice(-8), true);
+      hist.push({ role: "assistant", content: respuesta });
+      conversaciones.set(from, hist);
+      await enviarMensaje(phoneId, from, respuesta);
       return;
     }
 
-    if (estado === "cerrado") {
-      await enviarMensaje(phoneNumberId, from, MENSAJE_FUERA_HORARIO);
-      console.log(`🕐 Fuera de horario, mensaje automático enviado a ${from}`);
+    // 4 — FUERA DE HORARIO SIN URGENCIA
+    if (fueraHorario) {
+      await enviarMensaje(phoneId, from, MSG_FUERA_HORARIO);
+      console.log(`🕐 Fuera de horario → ${from}`);
       return;
     }
 
-    // --------------------------------------------------------
-    //  Respuesta con IA
-    // --------------------------------------------------------
+    // 5 — HORARIO NORMAL CON IA
     if (!conversaciones.has(from)) conversaciones.set(from, []);
-    const historial = conversaciones.get(from);
-    historial.push({ role: "user", content: texto });
+    const hist = conversaciones.get(from);
+    hist.push({ role: "user", content: texto });
 
-    const response = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
-      max_tokens: 400,
-      messages: [
-        { role: "system", content: buildPrompt() },
-        ...historial.slice(-10),
-      ],
-    });
+    const respuesta = await consultarIA(hist.slice(-10));
+    hist.push({ role: "assistant", content: respuesta });
+    if (hist.length > 30) conversaciones.set(from, hist.slice(-20));
 
-    const respuesta = response.choices[0].message.content;
-    historial.push({ role: "assistant", content: respuesta });
-    if (historial.length > 30) conversaciones.set(from, historial.slice(-20));
+    // Notificar si da datos completos de visita
+    const tieneNombre    = /me llamo |soy |mi nombre es /i.test(texto);
+    const tieneDireccion = /calle |avenida |barrio |entre |vivo en |quedo en |mi domicilio/i.test(texto);
+    if (tieneNombre && tieneDireccion) {
+      await notificarDiego(phoneId,
+`📋 *Solicitud de visita*
 
-    // --------------------------------------------------------
-    //  NOTIFICACIÓN A DIEGO cuando alguien agenda visita
-    // --------------------------------------------------------
-    const quiereVisita = /nombre|direcci[oó]n|horario|visita|coordinar|agenda|cuando pueden|cu[aá]ndo/i.test(texto);
-    const tieneNombre = /me llamo|soy |mi nombre/i.test(texto);
-    const tieneDireccion = /calle|avenida|barrio|entre |altura |n[uú]mero|\d{3,}/i.test(texto);
-    const tieneUbicacion = tieneDireccion || /vivo en|estoy en|quedo en|mi casa|domicilio/i.test(texto);
+👤 ${from}
+💬 "${texto}"
 
-    // Notificar cuando alguien da datos de visita o dirección en urgencia
-    if ((tieneNombre || tieneUbicacion) && adminNorm && NUMERO_ADMIN) {
-      const aviso =
-`📋 *Nueva solicitud de visita*
-
-👤 Cliente: ${from}
-💬 Mensaje: "${texto}"
-
-Revisar y confirmar turno.`;
-      try {
-        await enviarMensaje(phoneNumberId, NUMERO_ADMIN, aviso);
-        console.log(`🔔 Notificación de visita enviada a Diego`);
-      } catch (e) {
-        console.warn("No se pudo notificar a Diego:", e.message);
-      }
+Revisar y confirmar turno.`);
     }
 
-    await enviarMensaje(phoneNumberId, from, respuesta);
+    await enviarMensaje(phoneId, from, respuesta);
 
   } catch (err) {
-    console.error("❌ Error procesando mensaje:", err.message);
+    if (err.message === "TOKEN_EXPIRADO") return;
+    console.error("❌ Error:", err.message);
   }
 });
 
 // ============================================================
-//  Envío con fallback formato argentino
+//  Health check con estado del sistema
 // ============================================================
-function formatosNumero(numero) {
-  const formatos = [numero];
-  if (numero.startsWith("549")) formatos.push("54" + numero.slice(3));
-  else if (numero.startsWith("54") && !numero.startsWith("549")) formatos.push("549" + numero.slice(2));
-  return formatos;
-}
-
-async function enviarMensaje(phoneNumberId, to, texto) {
-  const url = `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`;
-  const numeros = formatosNumero(to);
-
-  for (const numero of numeros) {
-    console.log(`📤 Intentando enviar a ${numero}...`);
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        messaging_product: "whatsapp",
-        to: numero,
-        type: "text",
-        text: { body: texto },
-      }),
-    });
-
-    if (res.ok) { console.log(`✉️  Enviado a ${numero}`); return; }
-
-    const errorText = await res.text();
-    console.warn(`⚠️  Falló con ${numero}: ${errorText}`);
-    if (!errorText.includes("131030")) throw new Error(`Meta API error: ${errorText}`);
-  }
-  throw new Error("No se pudo enviar con ningún formato de número");
-}
+app.get("/", (req, res) => {
+  const hora = new Date().toLocaleString("es-AR", { timeZone: "America/Argentina/Buenos_Aires" });
+  res.send([
+    "DC Electricista Bot — activo ✅",
+    `Hora Argentina: ${hora}`,
+    `Horario: ${estadoHorario()}`,
+    `Bloqueados: ${bloqueados.size}`,
+    `Urgencias activas: ${urgenciasActivas.size}`,
+    `Conocimiento extra: ${conocimiento.length} items`,
+  ].join("\n"));
+});
 
 // ============================================================
-//  Health check + servidor
+//  Servidor
 // ============================================================
-app.get("/", (req, res) => res.send("DC Electricista Bot — activo ✅"));
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Bot corriendo en puerto ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`🚀 DC Electricista Bot — puerto ${PORT}`);
+  console.log(`📍 Horario: ${estadoHorario()}`);
+  console.log(`🚫 Bloqueados: ${bloqueados.size} | 🚨 Urgencias: ${urgenciasActivas.size} | 🧠 Conocimiento: ${conocimiento.length}`);
+});
